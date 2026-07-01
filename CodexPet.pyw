@@ -46,6 +46,7 @@ MAX_SCALE = 2.0
 ALPHA_THRESHOLD = 18
 LIVE_SCALE_QUANTUM = 0.01
 FRAME_CACHE_LIMIT = 16
+DISPLAY_WATCHDOG_MS = 2_000
 
 RESIZE_HANDLE_SIZE = 30
 RESIZE_HANDLE_RADIUS = 11
@@ -235,8 +236,10 @@ class PetApp:
         self.speeds = {state: speed for state, speed in STATES}
         self.state = "idle"
         self.frame_index = 0
+        self.current_frame_image = None
         self.revert_job = None
         self.random_job = None
+        self.watchdog_job = None
         self.random_enabled = bool(self.settings.get("random_actions", True))
         self.drag_origin = None
         self.root_origin = None
@@ -447,13 +450,86 @@ class PetApp:
         self.root.geometry(f"{self.window_w}x{self.window_h}+{x}+{y}")
         self.root.deiconify()
 
+    def apply_window_invariants(self) -> None:
+        try:
+            self.root.deiconify()
+            self.root.attributes("-topmost", True)
+            self.root.wm_attributes("-transparentcolor", TRANSPARENT_COLOR)
+            self.root.lift()
+        except tk.TclError:
+            pass
+        if not self.label.winfo_ismapped():
+            self.label.pack()
+        self.position_resize_handle()
+
+    def current_frames(self) -> list[ImageTk.PhotoImage]:
+        frames = self.frames.get(self.state) or self.frames.get("idle")
+        if frames:
+            return frames
+
+        self.state = "idle"
+        self.load_frames(live=False)
+        return self.frames.get("idle", [])
+
+    def show_current_frame(self, reset: bool = False) -> None:
+        frames = self.current_frames()
+        if not frames:
+            return
+        if reset:
+            self.frame_index = 0
+        image = frames[self.frame_index % len(frames)]
+        self.current_frame_image = image
+        self.label.configure(image=image)
+
+    def recover_display(self) -> None:
+        if self.resize_origin is None and self.frames_quality != "final":
+            self.load_frames(live=False)
+        if not (self.frames.get(self.state) or self.frames.get("idle")):
+            self.state = "idle"
+            self.load_frames(live=False)
+        self.show_current_frame(reset=True)
+        self.apply_window_invariants()
+
+    def display_image_is_alive(self) -> bool:
+        try:
+            image_name = str(self.label.cget("image"))
+            if not image_name:
+                return False
+            return image_name in self.root.tk.call("image", "names")
+        except tk.TclError:
+            return False
+
+    def watchdog_display(self) -> None:
+        try:
+            needs_recovery = (
+                not self.display_image_is_alive()
+                or self.root.state() == "withdrawn"
+                or not (self.frames.get(self.state) or self.frames.get("idle"))
+            )
+            if self.resize_origin is None and self.frames_quality != "final":
+                needs_recovery = True
+            if needs_recovery:
+                self.recover_display()
+            else:
+                self.apply_window_invariants()
+        except Exception:
+            log_error()
+        finally:
+            self.watchdog_job = self.root.after(DISPLAY_WATCHDOG_MS, self.watchdog_display)
+
     def animate(self) -> None:
-        frames = self.frames.get(self.state) or self.frames["idle"]
-        self.label.configure(image=frames[self.frame_index % len(frames)])
-        self.frame_index += 1
-        self.root.after(self.speeds.get(self.state, 150), self.animate)
+        try:
+            self.show_current_frame()
+            self.frame_index += 1
+        except Exception:
+            log_error()
+            self.recover_display()
+        finally:
+            self.root.after(self.speeds.get(self.state, 150), self.animate)
 
     def set_state(self, state: str) -> None:
+        if self.resize_origin is None and self.frames_quality != "final":
+            self.load_frames(live=False)
         if state not in self.frames or not self.frames[state]:
             state = "idle"
         if self.revert_job is not None:
@@ -494,8 +570,7 @@ class PetApp:
         x = min(max(0, x), max(0, screen_w - self.window_w))
         y = min(max(0, y), max(0, screen_h - self.window_h))
         self.root.geometry(f"{self.window_w}x{self.window_h}+{x}+{y}")
-        self.label.configure(image=(self.frames.get(self.state) or self.frames["idle"])[0])
-        self.frame_index = 0
+        self.show_current_frame(reset=True)
         self.settings["scale"] = self.scale
         self.position_resize_handle()
         if save:
@@ -641,7 +716,9 @@ class PetApp:
     def run_random_action(self) -> None:
         self.random_job = None
         if self.random_enabled:
-            choices = [state for state in RANDOM_STATES if self.frames.get(state) and state != self.state]
+            if self.resize_origin is None and self.frames_quality != "final":
+                self.load_frames(live=False)
+            choices = [state for state in RANDOM_STATES if self.source_frames.get(state) and state != self.state]
             if choices and not self.dragging and self.resize_origin is None:
                 return_state = self.state if self.frames.get(self.state) else "idle"
                 self.play_once(random.choice(choices), RANDOM_DURATION_MS, return_state=return_state)
@@ -828,6 +905,9 @@ class PetApp:
         if self.pointer_job is not None:
             self.root.after_cancel(self.pointer_job)
             self.pointer_job = None
+        if self.watchdog_job is not None:
+            self.root.after_cancel(self.watchdog_job)
+            self.watchdog_job = None
         self.hide_menu()
         if self.resize_handle is not None:
             try:
@@ -839,6 +919,7 @@ class PetApp:
 
     def run(self) -> None:
         self.schedule_random_action()
+        self.watchdog_display()
         self.animate()
         self.root.mainloop()
 

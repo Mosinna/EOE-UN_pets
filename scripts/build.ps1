@@ -16,6 +16,15 @@ python -m PyInstaller `
     --onefile `
     --windowed `
     --name CodexPet `
+    --exclude-module numpy `
+    --exclude-module matplotlib `
+    --exclude-module pandas `
+    --exclude-module scipy `
+    --exclude-module PIL.ImageQt `
+    --exclude-module PyQt5 `
+    --exclude-module PyQt6 `
+    --exclude-module PySide2 `
+    --exclude-module PySide6 `
     --add-data "$root\assets;assets" `
     --distpath $dist `
     --workpath $build `
