@@ -22,6 +22,12 @@ else:
 
 ASSET_DIR = RESOURCE_DIR / "assets"
 SPRITESHEET = ASSET_DIR / "spritesheet.webp"
+OUTFITS = [
+    ("default", "\u539f\u7248", "spritesheet.webp"),
+    ("coat_on", "\u7a7f\u5916\u5957", "spritesheet_coat_on.webp"),
+    ("coat_off", "\u8131\u5916\u5957", "spritesheet_coat_off.webp"),
+]
+OUTFIT_LOOKUP = {outfit_id: (label, filename) for outfit_id, label, filename in OUTFITS}
 STATE_FILE = BASE_DIR / "pet-state.json"
 LOG_FILE = BASE_DIR / "pet-error.log"
 
@@ -38,9 +44,11 @@ STATES = [
     ("running", 115),
     ("review", 150),
 ]
-RANDOM_STATES = ["waving", "jumping", "waiting", "running", "review"]
+RANDOM_STATES = ["waving", "failed", "waiting", "running", "review"]
 RANDOM_INTERVAL_MS = 60_000
-RANDOM_DURATION_MS = 4_000
+RANDOM_LOOPS = 2
+DRAG_ACTION_THRESHOLD = 3
+RIGHT_DRAG_THRESHOLD = 18
 MIN_SCALE = 0.5
 MAX_SCALE = 2.0
 ALPHA_THRESHOLD = 18
@@ -53,6 +61,8 @@ RESIZE_HANDLE_RADIUS = 11
 RESIZE_NEAR_MARGIN = 54
 RESIZE_POLL_MS = 90
 
+MENU_LIFT_RETRY_MS = (1, 40, 120, 300, 800, 1600)
+MENU_OUTSIDE_POLL_MS = 45
 MENU_WIDTH = 236
 MENU_PADDING = 10
 MENU_ITEM_HEIGHT = 36
@@ -63,6 +73,20 @@ MENU_BORDER = "#d8dce5"
 MENU_HOVER = "#ffffff"
 MENU_TEXT = "#141820"
 MENU_MUTED = "#5b6472"
+MENU_ACTIVE_BG = "#eaf0ff"
+MENU_ACTIVE_BORDER = "#8da8f7"
+MENU_ACTIVE_TEXT = "#203a72"
+MENU_CHECK_MARK = "#315eea"
+
+WARDROBE_SIZE = 228
+WARDROBE_RADIUS = 108
+WARDROBE_BUTTON_RADIUS = 39
+WARDROBE_CENTER_RADIUS = 35
+WARDROBE_ICON_SIZE = 56
+WARDROBE_DISC_FILL = "#f7f8fb"
+WARDROBE_BUTTON_FILL = "#f8fafc"
+WARDROBE_BUTTON_HOVER = "#ffffff"
+WARDROBE_CENTER_FILL = "#eef2f7"
 
 
 class ACCENTPOLICY(ctypes.Structure):
@@ -93,6 +117,16 @@ def set_rounded_window(window: tk.Toplevel, width: int, height: int, radius: int
     try:
         hwnd = wintypes.HWND(window.winfo_id())
         region = ctypes.windll.gdi32.CreateRoundRectRgn(0, 0, width + 1, height + 1, radius, radius)
+        if region:
+            ctypes.windll.user32.SetWindowRgn(hwnd, region, True)
+    except Exception:
+        pass
+
+
+def set_ellipse_window(window: tk.Toplevel, width: int, height: int) -> None:
+    try:
+        hwnd = wintypes.HWND(window.winfo_id())
+        region = ctypes.windll.gdi32.CreateEllipticRgn(0, 0, width + 1, height + 1)
         if region:
             ctypes.windll.user32.SetWindowRgn(hwnd, region, True)
     except Exception:
@@ -151,7 +185,10 @@ def create_round_rect(canvas: tk.Canvas, x1: int, y1: int, x2: int, y2: int, rad
 def claim_single_instance():
     try:
         kernel32 = ctypes.windll.kernel32
-        handle = kernel32.CreateMutexW(None, False, "CodexPetStandalone_eoe_un")
+        kernel32.CreateMutexW.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.GetLastError.restype = wintypes.DWORD
+        handle = kernel32.CreateMutexW(None, True, "CodexPetStandalone_eoe_un")
         if handle and kernel32.GetLastError() == 183:
             sys.exit(0)
         return handle
@@ -182,6 +219,18 @@ def save_settings(settings: dict) -> None:
         pass
 
 
+def outfit_spritesheet(outfit_id: str) -> Path:
+    _label, filename = OUTFIT_LOOKUP.get(outfit_id, OUTFIT_LOOKUP["default"])
+    return ASSET_DIR / filename
+
+
+def normalize_outfit_id(value) -> str:
+    outfit_id = value if isinstance(value, str) else "default"
+    if outfit_id not in OUTFIT_LOOKUP or not outfit_spritesheet(outfit_id).exists():
+        return "default"
+    return outfit_id
+
+
 def frame_has_pixels(frame: Image.Image) -> bool:
     return frame.getchannel("A").getbbox() is not None
 
@@ -195,11 +244,11 @@ def clean_frame_for_tk(frame: Image.Image) -> Image.Image:
     return Image.composite(opaque, transparent_bg, mask)
 
 
-def scan_sheet() -> dict:
-    if not SPRITESHEET.exists():
-        raise FileNotFoundError(f"Missing sprite sheet: {SPRITESHEET}")
+def scan_sheet(path: Path = SPRITESHEET) -> dict:
+    if not path.exists():
+        raise FileNotFoundError(f"Missing sprite sheet: {path}")
 
-    sheet = Image.open(SPRITESHEET).convert("RGBA")
+    sheet = Image.open(path).convert("RGBA")
     if sheet.width % COLS != 0 or sheet.height % len(STATES) != 0:
         raise ValueError(f"Unexpected sprite sheet size: {sheet.size}")
 
@@ -215,10 +264,18 @@ def scan_sheet() -> dict:
         counts[state] = count
 
     return {
-        "spritesheet": str(SPRITESHEET),
+        "spritesheet": str(path),
         "size": [sheet.width, sheet.height],
         "cell": [cell_w, cell_h],
         "states": counts,
+    }
+
+
+def scan_all_sheets() -> dict:
+    return {
+        outfit_id: scan_sheet(outfit_spritesheet(outfit_id))
+        for outfit_id, _label, _filename in OUTFITS
+        if outfit_spritesheet(outfit_id).exists()
     }
 
 
@@ -227,12 +284,15 @@ class PetApp:
         self.settings = load_settings()
         self.scale = float(self.settings.get("scale", 1.0))
         self.scale = min(MAX_SCALE, max(MIN_SCALE, self.scale))
-        self.sheet = Image.open(SPRITESHEET).convert("RGBA")
+        self.outfit_id = normalize_outfit_id(self.settings.get("outfit", "default"))
+        self.sheet = Image.open(outfit_spritesheet(self.outfit_id)).convert("RGBA")
         self.source_frames: dict[str, list[Image.Image]] = {}
         self.frames: dict[str, list[ImageTk.PhotoImage]] = {}
-        self.frame_cache: dict[tuple[int, str, str], dict[str, list[ImageTk.PhotoImage]]] = {}
-        self.frame_cache_order: list[tuple[int, str, str]] = []
+        self.frame_cache: dict[tuple[str, int, str, str], list[ImageTk.PhotoImage]] = {}
+        self.frame_cache_order: list[tuple[str, int, str, str]] = []
         self.frames_quality = "final"
+        self.frames_scale_key = 0
+        self.frames_outfit_id = self.outfit_id
         self.speeds = {state: speed for state, speed in STATES}
         self.state = "idle"
         self.frame_index = 0
@@ -244,6 +304,8 @@ class PetApp:
         self.drag_origin = None
         self.root_origin = None
         self.dragging = False
+        self.right_origin = None
+        self.right_dragging = False
         self.resize_origin = None
         self.resize_start_scale = self.scale
         self.resize_start_geometry = None
@@ -255,10 +317,14 @@ class PetApp:
         self.menu_canvas = None
         self.menu_hover_index = None
         self.menu_layout = []
+        self.menu_outside_job = None
+        self.menu_wait_for_button_release = False
+        self.wardrobe_hover_id = None
+        self.wardrobe_icons: dict[str, ImageTk.PhotoImage] = {}
 
         self.root = tk.Tk()
         self.root.withdraw()
-        self.root.title("Codex Pet")
+        self.root.title("EOE-柚恩桌宠2.0")
         self.root.configure(bg=TRANSPARENT_COLOR)
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
@@ -275,6 +341,7 @@ class PetApp:
         self.label.pack()
 
         self.prepare_source_frames()
+        self.prepare_wardrobe_icons()
         self.load_frames()
         self.setup_menu()
         self.bind_events()
@@ -300,7 +367,7 @@ class PetApp:
                     state_frames.append(frame)
             self.source_frames[state] = state_frames
 
-    def remember_frame_cache(self, cache_key: tuple[int, str, str], frames: dict[str, list[ImageTk.PhotoImage]]) -> None:
+    def remember_frame_cache(self, cache_key: tuple[str, int, str, str], frames: list[ImageTk.PhotoImage]) -> None:
         self.frame_cache[cache_key] = frames
         self.frame_cache_order.append(cache_key)
         while len(self.frame_cache_order) > FRAME_CACHE_LIMIT:
@@ -308,43 +375,83 @@ class PetApp:
             if old_key != cache_key:
                 self.frame_cache.pop(old_key, None)
 
-    def load_frames(self, live: bool = False) -> None:
+    def scale_key_for_quality(self, live: bool) -> int:
+        return int(round(self.scale * (100 if live else 1000)))
+
+    def scaled_state_frames(self, state: str, quality: str, scale_key: int, live: bool) -> list[ImageTk.PhotoImage]:
+        cache_key = (self.outfit_id, scale_key, quality, state)
+        if cache_key in self.frame_cache:
+            return self.frame_cache[cache_key]
+
+        state_frames = []
+        resample = Image.Resampling.BILINEAR if live else Image.Resampling.LANCZOS
+        for source in self.source_frames.get(state, []):
+            frame = source
+            if self.scale != 1.0:
+                frame = frame.resize((self.window_w, self.window_h), resample)
+            frame = clean_frame_for_tk(frame)
+            state_frames.append(ImageTk.PhotoImage(frame))
+        self.remember_frame_cache(cache_key, state_frames)
+        return state_frames
+
+    def load_frames(self, live: bool = False, states: list[str] | None = None) -> None:
         quality = "live" if live else "final"
-        scale_key = int(round(self.scale * (100 if live else 1000)))
+        scale_key = self.scale_key_for_quality(live)
         live_state = self.state if live and self.source_frames.get(self.state) else "idle"
-        cache_key = (scale_key, quality, live_state if live else "all")
         self.window_w = int(round(self.cell_w * self.scale))
         self.window_h = int(round(self.cell_h * self.scale))
-        if cache_key in self.frame_cache:
-            self.frames = self.frame_cache[cache_key]
+
+        if (
+            self.frames_quality != quality
+            or self.frames_scale_key != scale_key
+            or self.frames_outfit_id != self.outfit_id
+        ):
+            self.frames = {}
             self.frames_quality = quality
-            return
+            self.frames_scale_key = scale_key
+            self.frames_outfit_id = self.outfit_id
 
-        scaled_frames = {}
-        resample = Image.Resampling.BILINEAR if live else Image.Resampling.LANCZOS
-        state_names = [live_state] if live else [state for state, _speed in STATES]
+        if states is None:
+            state_names = [live_state if live else self.state]
+            if not live and "idle" not in state_names:
+                state_names.append("idle")
+        else:
+            state_names = states
+        state_names = list(dict.fromkeys(state for state in state_names if self.source_frames.get(state)))
+        if not state_names and self.source_frames.get("idle"):
+            state_names = ["idle"]
+
         for state in state_names:
-            state_frames = []
-            for source in self.source_frames.get(state, []):
-                frame = source
-                if self.scale != 1.0:
-                    frame = frame.resize((self.window_w, self.window_h), resample)
-                frame = clean_frame_for_tk(frame)
-                state_frames.append(ImageTk.PhotoImage(frame))
-            scaled_frames[state] = state_frames
+            self.frames[state] = self.scaled_state_frames(state, quality, scale_key, live)
 
-        if live and live_state != "idle":
-            scaled_frames["idle"] = scaled_frames.get(live_state, [])
+        if not self.frames.get("idle") and not live and self.source_frames.get("idle"):
+            self.frames["idle"] = self.scaled_state_frames("idle", quality, scale_key, live)
 
-        if not scaled_frames.get("idle") and "idle" in state_names:
-            first_state = next((name for name, frames in scaled_frames.items() if frames), None)
-            if not first_state:
-                raise ValueError("Sprite sheet has no visible frames.")
-            scaled_frames["idle"] = scaled_frames[first_state]
+        if not any(self.frames.values()):
+            raise ValueError("Sprite sheet has no visible frames.")
 
-        self.remember_frame_cache(cache_key, scaled_frames)
-        self.frames = scaled_frames
-        self.frames_quality = quality
+    def prepare_wardrobe_icons(self) -> None:
+        self.wardrobe_icons = {}
+        for outfit_id, _label, _filename in OUTFITS:
+            path = outfit_spritesheet(outfit_id)
+            if not path.exists():
+                continue
+            try:
+                sheet = Image.open(path).convert("RGBA")
+            except Exception:
+                continue
+            cell_w = sheet.width // COLS
+            cell_h = sheet.height // len(STATES)
+            frame = sheet.crop((0, 0, cell_w, cell_h))
+            bbox = frame.getchannel("A").getbbox()
+            icon = Image.new("RGBA", (WARDROBE_ICON_SIZE, WARDROBE_ICON_SIZE), (0, 0, 0, 0))
+            if bbox is not None:
+                sprite = frame.crop(bbox)
+                sprite.thumbnail((WARDROBE_ICON_SIZE - 10, WARDROBE_ICON_SIZE - 6), Image.Resampling.LANCZOS)
+                x = (WARDROBE_ICON_SIZE - sprite.width) // 2
+                y = (WARDROBE_ICON_SIZE - sprite.height) // 2 + 2
+                icon.alpha_composite(sprite, (x, y))
+            self.wardrobe_icons[outfit_id] = ImageTk.PhotoImage(clean_frame_for_tk(icon))
 
     def setup_menu(self) -> None:
         self.menu_items = [
@@ -353,6 +460,7 @@ class PetApp:
             {"kind": "command", "label": "\u5de5\u4f5c", "action": "work"},
             {"kind": "command", "label": "\u5ba1\u9605", "action": "review"},
             {"kind": "command", "label": "\u7b49\u5f85", "action": "waiting"},
+            {"kind": "command", "label": "\u5931\u8d25", "action": "failed"},
             {"kind": "separator"},
             {"kind": "check", "label": "\u6bcf\u5206\u949f\u968f\u673a\u52a8\u4f5c", "action": "random"},
             {"kind": "separator"},
@@ -366,13 +474,15 @@ class PetApp:
             widget.bind("<B1-Motion>", self.on_drag)
             widget.bind("<ButtonRelease-1>", self.on_left_up)
             widget.bind("<Double-Button-1>", lambda _event: self.play_once("waving", 2600))
-            widget.bind("<Button-3>", self.show_menu)
+            widget.bind("<ButtonPress-3>", self.on_right_down)
+            widget.bind("<B3-Motion>", self.on_right_drag)
+            widget.bind("<ButtonRelease-3>", self.on_right_up)
 
     def setup_resize_handle(self) -> None:
         win = tk.Toplevel(self.root)
         win.withdraw()
         win.overrideredirect(True)
-        win.configure(bg=TRANSPARENT_COLOR)
+        win.configure(bg=MENU_BG)
         win.attributes("-topmost", True)
         try:
             win.wm_attributes("-toolwindow", True)
@@ -405,7 +515,9 @@ class PetApp:
             widget.bind("<ButtonPress-1>", self.on_resize_handle_down)
             widget.bind("<B1-Motion>", self.on_resize_handle_drag)
             widget.bind("<ButtonRelease-1>", self.on_resize_handle_up)
-            widget.bind("<Button-3>", self.show_menu)
+            widget.bind("<ButtonPress-3>", self.on_right_down)
+            widget.bind("<B3-Motion>", self.on_right_drag)
+            widget.bind("<ButtonRelease-3>", self.on_right_up)
 
         self.monitor_pointer()
 
@@ -455,20 +567,127 @@ class PetApp:
             self.root.deiconify()
             self.root.attributes("-topmost", True)
             self.root.wm_attributes("-transparentcolor", TRANSPARENT_COLOR)
-            self.root.lift()
+            if not self.menu_is_open():
+                self.root.lift()
         except tk.TclError:
             pass
         if not self.label.winfo_ismapped():
             self.label.pack()
         self.position_resize_handle()
+        self.lift_floating_windows()
+
+    def clear_menu_reference(self) -> None:
+        if self.menu_outside_job is not None:
+            try:
+                self.root.after_cancel(self.menu_outside_job)
+            except tk.TclError:
+                pass
+            self.menu_outside_job = None
+        self.menu_wait_for_button_release = False
+        self.menu_window = None
+        self.menu_canvas = None
+        self.menu_hover_index = None
+        self.menu_layout = []
+        self.wardrobe_hover_id = None
+
+    def menu_is_open(self) -> bool:
+        if self.menu_window is None:
+            return False
+        try:
+            if self.menu_window.winfo_exists():
+                return True
+        except tk.TclError:
+            pass
+        self.clear_menu_reference()
+        return False
+
+    def lift_floating_windows(self) -> None:
+        try:
+            if self.resize_handle_visible and self.resize_handle is not None:
+                self.resize_handle.attributes("-topmost", True)
+                self.resize_handle.lift()
+        except tk.TclError:
+            pass
+        self.lift_menu_window()
+
+    def lift_menu_window(self, focus: bool = False) -> None:
+        if self.menu_window is None:
+            return
+        try:
+            if not self.menu_window.winfo_exists():
+                self.clear_menu_reference()
+                return
+            self.menu_window.attributes("-topmost", True)
+            self.menu_window.lift()
+            if focus:
+                self.menu_window.focus_force()
+        except tk.TclError:
+            self.clear_menu_reference()
+
+    def schedule_menu_lift_retries(self) -> None:
+        for delay_ms in MENU_LIFT_RETRY_MS:
+            self.root.after(delay_ms, self.lift_menu_window)
+
+    def mouse_buttons_down(self) -> bool:
+        try:
+            user32 = ctypes.windll.user32
+            user32.GetAsyncKeyState.argtypes = (ctypes.c_int,)
+            user32.GetAsyncKeyState.restype = ctypes.c_short
+            return any(user32.GetAsyncKeyState(button) & 0x8001 for button in (1, 2, 4))
+        except Exception:
+            return False
+
+    def pointer_in_menu(self, x: int, y: int) -> bool:
+        if not self.menu_is_open():
+            return False
+        try:
+            left = self.menu_window.winfo_rootx()
+            top = self.menu_window.winfo_rooty()
+            right = left + self.menu_window.winfo_width()
+            bottom = top + self.menu_window.winfo_height()
+            return left <= x <= right and top <= y <= bottom
+        except tk.TclError:
+            self.clear_menu_reference()
+            return False
+
+    def schedule_menu_outside_monitor(self) -> None:
+        if self.menu_outside_job is None and self.menu_is_open():
+            self.menu_outside_job = self.root.after(MENU_OUTSIDE_POLL_MS, self.monitor_menu_outside_click)
+
+    def monitor_menu_outside_click(self) -> None:
+        self.menu_outside_job = None
+        if not self.menu_is_open():
+            return
+        buttons_down = self.mouse_buttons_down()
+        if self.menu_wait_for_button_release:
+            if not buttons_down:
+                self.menu_wait_for_button_release = False
+        elif buttons_down:
+            x = self.root.winfo_pointerx()
+            y = self.root.winfo_pointery()
+            if not self.pointer_in_menu(x, y):
+                self.hide_menu()
+                return
+        self.schedule_menu_outside_monitor()
 
     def current_frames(self) -> list[ImageTk.PhotoImage]:
-        frames = self.frames.get(self.state) or self.frames.get("idle")
+        frames = self.frames.get(self.state)
+        if frames:
+            return frames
+
+        if self.source_frames.get(self.state):
+            live = self.frames_quality == "live" and self.resize_origin is not None
+            self.load_frames(live=live, states=[self.state])
+            frames = self.frames.get(self.state)
+            if frames:
+                return frames
+
+        frames = self.frames.get("idle")
         if frames:
             return frames
 
         self.state = "idle"
-        self.load_frames(live=False)
+        self.load_frames(live=False, states=["idle"])
         return self.frames.get("idle", [])
 
     def show_current_frame(self, reset: bool = False) -> None:
@@ -483,10 +702,10 @@ class PetApp:
 
     def recover_display(self) -> None:
         if self.resize_origin is None and self.frames_quality != "final":
-            self.load_frames(live=False)
+            self.load_frames(live=False, states=[self.state])
         if not (self.frames.get(self.state) or self.frames.get("idle")):
             self.state = "idle"
-            self.load_frames(live=False)
+            self.load_frames(live=False, states=["idle"])
         self.show_current_frame(reset=True)
         self.apply_window_invariants()
 
@@ -504,7 +723,7 @@ class PetApp:
             needs_recovery = (
                 not self.display_image_is_alive()
                 or self.root.state() == "withdrawn"
-                or not (self.frames.get(self.state) or self.frames.get("idle"))
+                or (not self.source_frames.get(self.state) and not self.frames.get("idle"))
             )
             if self.resize_origin is None and self.frames_quality != "final":
                 needs_recovery = True
@@ -528,15 +747,35 @@ class PetApp:
             self.root.after(self.speeds.get(self.state, 150), self.animate)
 
     def set_state(self, state: str) -> None:
-        if self.resize_origin is None and self.frames_quality != "final":
-            self.load_frames(live=False)
-        if state not in self.frames or not self.frames[state]:
+        if not self.source_frames.get(state):
             state = "idle"
         if self.revert_job is not None:
             self.root.after_cancel(self.revert_job)
             self.revert_job = None
         self.state = state
         self.frame_index = 0
+        live = self.resize_origin is not None
+        self.load_frames(live=live, states=[state])
+
+    def set_outfit(self, outfit_id: str) -> None:
+        outfit_id = normalize_outfit_id(outfit_id)
+        if outfit_id == self.outfit_id:
+            return
+        if self.revert_job is not None:
+            self.root.after_cancel(self.revert_job)
+            self.revert_job = None
+        self.outfit_id = outfit_id
+        self.settings["outfit"] = self.outfit_id
+        self.sheet = Image.open(outfit_spritesheet(self.outfit_id)).convert("RGBA")
+        self.frame_cache.clear()
+        self.frame_cache_order.clear()
+        self.frames = {}
+        self.prepare_source_frames()
+        if not self.source_frames.get(self.state):
+            self.state = "idle"
+        self.load_frames(live=False, states=[self.state])
+        self.show_current_frame(reset=True)
+        self.save_position()
 
     def play_once(self, state: str, duration_ms: int, return_state: str = "idle") -> None:
         self.set_state(state)
@@ -548,7 +787,13 @@ class PetApp:
             new_scale = round(round(clamped / LIVE_SCALE_QUANTUM) * LIVE_SCALE_QUANTUM, 2)
         else:
             new_scale = round(clamped, 3)
-        if not force and abs(new_scale - self.scale) < 0.001 and self.frames_quality == ("live" if live else "final"):
+        target_quality = "live" if live else "final"
+        if (
+            not force
+            and abs(new_scale - self.scale) < 0.001
+            and self.frames_quality == target_quality
+            and (self.frames.get(self.state) or self.frames.get("idle"))
+        ):
             return
 
         old_w = self.window_w
@@ -557,7 +802,7 @@ class PetApp:
         old_y = self.root.winfo_y()
 
         self.scale = new_scale
-        self.load_frames(live=live)
+        self.load_frames(live=live, states=[self.state])
         if anchor == "top_left":
             x = old_x
             y = old_y
@@ -590,8 +835,13 @@ class PetApp:
         self.dragging = abs(dx) > 2 or abs(dy) > 2
         self.root.geometry(f"+{self.root_origin[0] + dx}+{self.root_origin[1] + dy}")
         self.position_resize_handle()
-        if abs(dx) > 3:
-            self.set_state("running-right" if dx > 0 else "running-left")
+        target_state = None
+        if abs(dy) > DRAG_ACTION_THRESHOLD and abs(dy) >= abs(dx):
+            target_state = "jumping"
+        elif abs(dx) > DRAG_ACTION_THRESHOLD:
+            target_state = "running-right" if dx > 0 else "running-left"
+        if target_state and target_state != self.state:
+            self.set_state(target_state)
 
     def on_left_up(self, _event) -> None:
         self.save_position()
@@ -602,6 +852,31 @@ class PetApp:
         self.drag_origin = None
         self.root_origin = None
         self.dragging = False
+
+    def on_right_down(self, event) -> None:
+        self.right_origin = (event.x_root, event.y_root)
+        self.right_dragging = False
+
+    def on_right_drag(self, event) -> None:
+        if not self.right_origin:
+            return
+        dx = event.x_root - self.right_origin[0]
+        dy = event.y_root - self.right_origin[1]
+        if not self.right_dragging and (dx * dx + dy * dy) ** 0.5 >= RIGHT_DRAG_THRESHOLD:
+            self.right_dragging = True
+            self.show_wardrobe_wheel_at(self.right_origin[0], self.right_origin[1])
+        elif self.right_dragging:
+            self.lift_menu_window()
+
+    def on_right_up(self, event) -> None:
+        try:
+            if self.right_dragging:
+                self.select_wardrobe_at_root(event.x_root, event.y_root)
+            else:
+                self.show_action_menu_at(event.x_root, event.y_root)
+        finally:
+            self.right_origin = None
+            self.right_dragging = False
 
     def on_resize_handle_down(self, event) -> None:
         self.hide_menu()
@@ -679,6 +954,7 @@ class PetApp:
             self.resize_handle.lift()
         else:
             self.position_resize_handle()
+        self.lift_menu_window()
 
     def hide_resize_handle(self) -> None:
         if self.resize_origin or not self.resize_handle or not self.resize_handle_visible:
@@ -690,6 +966,7 @@ class PetApp:
         self.settings["x"] = int(self.root.winfo_x())
         self.settings["y"] = int(self.root.winfo_y())
         self.settings["scale"] = self.scale
+        self.settings["outfit"] = self.outfit_id
         save_settings(self.settings)
 
     def set_random_actions(self, enabled: bool) -> None:
@@ -718,11 +995,15 @@ class PetApp:
         if self.random_enabled:
             if self.resize_origin is None and self.frames_quality != "final":
                 self.load_frames(live=False)
-            choices = [state for state in RANDOM_STATES if self.source_frames.get(state) and state != self.state]
-            if choices and not self.dragging and self.resize_origin is None:
-                return_state = self.state if self.frames.get(self.state) else "idle"
-                self.play_once(random.choice(choices), RANDOM_DURATION_MS, return_state=return_state)
+            choices = [state for state in RANDOM_STATES if self.source_frames.get(state)]
+            if choices and self.state == "idle" and not self.dragging and self.resize_origin is None:
+                state = random.choice(choices)
+                self.play_once(state, self.state_loop_duration_ms(state, RANDOM_LOOPS), return_state="idle")
             self.schedule_random_action()
+
+    def state_loop_duration_ms(self, state: str, loops: int) -> int:
+        frame_count = max(1, len(self.source_frames.get(state, [])))
+        return frame_count * self.speeds.get(state, 150) * loops
 
     def menu_height(self) -> int:
         height = MENU_PADDING * 2
@@ -731,12 +1012,15 @@ class PetApp:
         return height
 
     def show_menu(self, event) -> None:
+        self.show_action_menu_at(event.x_root, event.y_root)
+
+    def show_action_menu_at(self, x_root: int, y_root: int) -> None:
         self.hide_menu()
         height = self.menu_height()
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
-        x = min(max(0, event.x_root), max(0, screen_w - MENU_WIDTH))
-        y = min(max(0, event.y_root), max(0, screen_h - height))
+        x = min(max(0, x_root), max(0, screen_w - MENU_WIDTH))
+        y = min(max(0, y_root), max(0, screen_h - height))
 
         win = tk.Toplevel(self.root)
         win.withdraw()
@@ -744,15 +1028,15 @@ class PetApp:
         win.configure(bg=TRANSPARENT_COLOR)
         win.attributes("-topmost", True)
         try:
-            win.wm_attributes("-toolwindow", True)
+            win.transient(self.root)
         except tk.TclError:
             pass
         try:
-            win.wm_attributes("-transparentcolor", TRANSPARENT_COLOR)
+            win.wm_attributes("-toolwindow", True)
         except tk.TclError:
             pass
 
-        canvas = tk.Canvas(win, width=MENU_WIDTH, height=height, bg=TRANSPARENT_COLOR, bd=0, highlightthickness=0)
+        canvas = tk.Canvas(win, width=MENU_WIDTH, height=height, bg=MENU_BG, bd=0, highlightthickness=0)
         canvas.pack()
         canvas.bind("<Motion>", self.on_menu_motion)
         canvas.bind("<Leave>", self.on_menu_leave)
@@ -763,17 +1047,172 @@ class PetApp:
         self.menu_window = win
         self.menu_canvas = canvas
         self.menu_hover_index = None
+        self.menu_wait_for_button_release = True
         self.draw_menu()
 
         win.geometry(f"{MENU_WIDTH}x{height}+{x}+{y}")
         win.update_idletasks()
         win.deiconify()
         win.update_idletasks()
-        win.lift()
+        self.apply_popup_effects(win, MENU_WIDTH, height, MENU_RADIUS)
+        self.lift_menu_window(focus=True)
+        self.schedule_menu_lift_retries()
+        self.schedule_menu_outside_monitor()
+
+    def apply_popup_effects(self, win: tk.Toplevel, width: int, height: int, radius: int, ellipse: bool = False) -> None:
         try:
-            win.focus_force()
+            win.attributes("-alpha", 0.96)
         except tk.TclError:
             pass
+        enable_acrylic(win, 210)
+        if ellipse:
+            set_ellipse_window(win, width, height)
+        else:
+            set_rounded_window(win, width, height, radius * 2)
+
+    def wardrobe_options(self) -> list[tuple[str, str, int, int]]:
+        center = WARDROBE_SIZE // 2
+        return [
+            ("default", "\u539f\u7248", center, 42),
+            ("coat_on", "\u5916\u5957", 62, 158),
+            ("coat_off", "\u80cc\u5fc3", 166, 158),
+        ]
+
+    def show_wardrobe_wheel(self, event) -> None:
+        self.show_wardrobe_wheel_at(event.x_root, event.y_root)
+
+    def show_wardrobe_wheel_at(self, x_root: int, y_root: int) -> None:
+        self.hide_menu()
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        x = min(max(0, x_root - WARDROBE_SIZE // 2), max(0, screen_w - WARDROBE_SIZE))
+        y = min(max(0, y_root - WARDROBE_SIZE // 2), max(0, screen_h - WARDROBE_SIZE))
+
+        win = tk.Toplevel(self.root)
+        win.withdraw()
+        win.overrideredirect(True)
+        win.configure(bg=MENU_BG)
+        win.attributes("-topmost", True)
+        try:
+            win.transient(self.root)
+        except tk.TclError:
+            pass
+        try:
+            win.wm_attributes("-toolwindow", True)
+        except tk.TclError:
+            pass
+
+        canvas = tk.Canvas(win, width=WARDROBE_SIZE, height=WARDROBE_SIZE, bg=MENU_BG, bd=0, highlightthickness=0)
+        canvas.pack()
+        canvas.bind("<Motion>", self.on_wardrobe_motion)
+        canvas.bind("<Leave>", self.on_wardrobe_leave)
+        canvas.bind("<ButtonRelease-1>", self.on_wardrobe_click)
+        canvas.bind("<ButtonRelease-3>", self.on_wardrobe_click)
+        win.bind("<Escape>", lambda _event: self.hide_menu())
+        win.bind("<Button-3>", lambda _event: self.hide_menu())
+
+        self.menu_window = win
+        self.menu_canvas = canvas
+        self.menu_wait_for_button_release = True
+        self.wardrobe_hover_id = None
+        self.draw_wardrobe_wheel()
+
+        win.geometry(f"{WARDROBE_SIZE}x{WARDROBE_SIZE}+{x}+{y}")
+        win.update_idletasks()
+        win.deiconify()
+        win.update_idletasks()
+        self.apply_popup_effects(win, WARDROBE_SIZE, WARDROBE_SIZE, WARDROBE_SIZE // 2, ellipse=True)
+        self.lift_menu_window(focus=True)
+        self.schedule_menu_lift_retries()
+        self.schedule_menu_outside_monitor()
+
+    def draw_wardrobe_wheel(self) -> None:
+        if not self.menu_canvas:
+            return
+        canvas = self.menu_canvas
+        canvas.delete("all")
+        center = WARDROBE_SIZE // 2
+        canvas.create_oval(
+            center - WARDROBE_RADIUS,
+            center - WARDROBE_RADIUS,
+            center + WARDROBE_RADIUS,
+            center + WARDROBE_RADIUS,
+            fill=WARDROBE_DISC_FILL,
+            outline="",
+        )
+        self.menu_layout = [("menu", "menu", center, center, WARDROBE_CENTER_RADIUS)]
+        center_hover = self.wardrobe_hover_id == "menu"
+        canvas.create_oval(
+            center - WARDROBE_CENTER_RADIUS,
+            center - WARDROBE_CENTER_RADIUS,
+            center + WARDROBE_CENTER_RADIUS,
+            center + WARDROBE_CENTER_RADIUS,
+            fill=WARDROBE_BUTTON_HOVER if center_hover else WARDROBE_CENTER_FILL,
+            outline="",
+        )
+        canvas.create_text(center, center, text="\u83dc\u5355", fill=MENU_TEXT, font=("Segoe UI", 10))
+
+        for outfit_id, label, cx, cy in self.wardrobe_options():
+            self.menu_layout.append(("outfit", outfit_id, cx, cy, WARDROBE_BUTTON_RADIUS))
+            active = outfit_id == self.outfit_id
+            hover = self.wardrobe_hover_id == outfit_id
+            fill = MENU_ACTIVE_BG if active else (WARDROBE_BUTTON_HOVER if hover else WARDROBE_BUTTON_FILL)
+            text_fill = MENU_ACTIVE_TEXT if active else MENU_TEXT
+            canvas.create_oval(
+                cx - WARDROBE_BUTTON_RADIUS,
+                cy - WARDROBE_BUTTON_RADIUS,
+                cx + WARDROBE_BUTTON_RADIUS,
+                cy + WARDROBE_BUTTON_RADIUS,
+                fill=fill,
+                outline="",
+            )
+            icon = self.wardrobe_icons.get(outfit_id)
+            if icon is not None:
+                canvas.create_image(cx, cy - 5, image=icon)
+            canvas.create_text(cx, cy + 25, text=label, fill=text_fill, font=("Segoe UI", 8))
+
+    def wardrobe_item_at(self, x: int, y: int):
+        for kind, value, cx, cy, radius in self.menu_layout:
+            if (x - cx) ** 2 + (y - cy) ** 2 <= radius**2:
+                return kind, value
+        return None
+
+    def on_wardrobe_motion(self, event) -> None:
+        hit = self.wardrobe_item_at(event.x, event.y)
+        hover_id = hit[1] if hit else None
+        if hover_id != self.wardrobe_hover_id:
+            self.wardrobe_hover_id = hover_id
+            self.draw_wardrobe_wheel()
+
+    def on_wardrobe_leave(self, _event) -> None:
+        if self.wardrobe_hover_id is not None:
+            self.wardrobe_hover_id = None
+            self.draw_wardrobe_wheel()
+
+    def on_wardrobe_click(self, event) -> None:
+        hit = self.wardrobe_item_at(event.x, event.y)
+        self.select_wardrobe_hit(hit, event.x_root, event.y_root)
+
+    def select_wardrobe_at_root(self, x_root: int, y_root: int) -> None:
+        if not self.menu_is_open() or self.menu_window is None:
+            return
+        try:
+            x = x_root - self.menu_window.winfo_rootx()
+            y = y_root - self.menu_window.winfo_rooty()
+        except tk.TclError:
+            return
+        self.select_wardrobe_hit(self.wardrobe_item_at(x, y), x_root, y_root)
+
+    def select_wardrobe_hit(self, hit, x_root: int, y_root: int) -> None:
+        if not hit:
+            return
+        kind, value = hit
+        if kind == "menu":
+            self.hide_menu()
+            self.show_action_menu_at(x_root, y_root)
+        elif kind == "outfit":
+            self.hide_menu()
+            self.set_outfit(value)
 
     def hide_menu(self) -> None:
         if self.menu_window is not None:
@@ -781,10 +1220,7 @@ class PetApp:
                 self.menu_window.destroy()
             except tk.TclError:
                 pass
-        self.menu_window = None
-        self.menu_canvas = None
-        self.menu_hover_index = None
-        self.menu_layout = []
+        self.clear_menu_reference()
 
     def draw_menu(self) -> None:
         if not self.menu_canvas:
@@ -831,11 +1267,11 @@ class PetApp:
             if item["kind"] == "check":
                 box_x = MENU_PADDING + 12
                 box_y = y1 + 10
-                fill = "#161a22" if self.random_enabled else "#ffffff"
-                outline = "#161a22" if self.random_enabled else "#a8afbb"
+                fill = MENU_ACTIVE_BG if self.random_enabled else "#ffffff"
+                outline = MENU_ACTIVE_BORDER if self.random_enabled else "#a8afbb"
                 create_round_rect(canvas, box_x, box_y, box_x + 16, box_y + 16, 5, fill=fill, outline=outline)
                 if self.random_enabled:
-                    canvas.create_line(box_x + 4, box_y + 8, box_x + 7, box_y + 11, box_x + 12, box_y + 5, fill="#ffffff", width=2)
+                    canvas.create_line(box_x + 4, box_y + 8, box_x + 7, box_y + 11, box_x + 12, box_y + 5, fill=MENU_CHECK_MARK, width=2)
                 text_x = MENU_PADDING + 38
             else:
                 text_x = MENU_PADDING + 14
@@ -848,7 +1284,9 @@ class PetApp:
                 fill=MENU_TEXT,
                 font=("Segoe UI", 10),
             )
-            if item.get("action") == self.state:
+            action = item.get("action")
+            active = action == self.state or action == f"outfit:{self.outfit_id}"
+            if active:
                 canvas.create_oval(MENU_WIDTH - 24, y1 + 15, MENU_WIDTH - 18, y1 + 21, fill=MENU_MUTED, outline="")
             y += MENU_ITEM_HEIGHT
 
@@ -883,13 +1321,15 @@ class PetApp:
         if action == "idle":
             self.set_state("idle")
         elif action == "wave":
-            self.play_once("waving", 2600)
+            self.set_state("waving")
         elif action == "work":
             self.set_state("running")
         elif action == "review":
             self.set_state("review")
         elif action == "waiting":
             self.set_state("waiting")
+        elif action == "failed":
+            self.set_state("failed")
         elif action == "open":
             self.open_folder()
         elif action == "quit":
@@ -908,6 +1348,9 @@ class PetApp:
         if self.watchdog_job is not None:
             self.root.after_cancel(self.watchdog_job)
             self.watchdog_job = None
+        if self.menu_outside_job is not None:
+            self.root.after_cancel(self.menu_outside_job)
+            self.menu_outside_job = None
         self.hide_menu()
         if self.resize_handle is not None:
             try:
@@ -925,7 +1368,7 @@ class PetApp:
 
 
 def run_check() -> int:
-    print(json.dumps(scan_sheet(), indent=2))
+    print(json.dumps(scan_all_sheets(), indent=2))
     return 0
 
 

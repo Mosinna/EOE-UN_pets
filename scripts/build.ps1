@@ -4,7 +4,8 @@ $root = Split-Path -Parent $PSScriptRoot
 $dist = Join-Path $root "dist"
 $build = Join-Path $root "build"
 $exe = Join-Path $dist "CodexPet.exe"
-$zip = Join-Path $dist "CodexPetStandalone-share.zip"
+$releaseZipName = "EOE-" + [char]0x67DA + [char]0x6069 + [char]0x684C + [char]0x5BA0 + "2.0.zip"
+$zip = Join-Path $dist $releaseZipName
 
 if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
 if (Test-Path $build) { Remove-Item $build -Recurse -Force }
