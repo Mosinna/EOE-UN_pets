@@ -21,11 +21,11 @@ else:
     RESOURCE_DIR = BASE_DIR
 
 ASSET_DIR = RESOURCE_DIR / "assets"
-SPRITESHEET = ASSET_DIR / "spritesheet.webp"
+SPRITESHEET = ASSET_DIR / "spritesheet.png"
 OUTFITS = [
-    ("default", "\u539f\u7248", "spritesheet.webp"),
-    ("coat_on", "\u7a7f\u5916\u5957", "spritesheet_coat_on.webp"),
-    ("coat_off", "\u8131\u5916\u5957", "spritesheet_coat_off.webp"),
+    ("default", "\u539f\u7248", "spritesheet.png"),
+    ("coat_on", "\u7a7f\u5916\u5957", "spritesheet_coat_on.png"),
+    ("coat_off", "\u8131\u5916\u5957", "spritesheet_coat_off.png"),
 ]
 OUTFIT_LOOKUP = {outfit_id: (label, filename) for outfit_id, label, filename in OUTFITS}
 STATE_FILE = BASE_DIR / "pet-state.json"

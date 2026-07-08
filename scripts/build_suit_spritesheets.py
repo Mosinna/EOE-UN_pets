@@ -121,6 +121,16 @@ def clear_low_alpha(image: Image.Image, threshold: int = 12) -> Image.Image:
     return rgba
 
 
+def normalize_transparent_pixels(image: Image.Image) -> Image.Image:
+    rgba = image.convert("RGBA")
+    pixels = rgba.load()
+    for y in range(rgba.height):
+        for x in range(rgba.width):
+            if pixels[x, y][3] == 0:
+                pixels[x, y] = (0, 0, 0, 0)
+    return rgba
+
+
 def crop_foreground(source: Image.Image, box: tuple[int, int, int, int]) -> Image.Image | None:
     cleaned = remove_green_background(source.crop(box))
     bbox = cleaned.getchannel("A").getbbox()
@@ -351,13 +361,14 @@ def main() -> int:
     for outfit in OUTFITS:
         atlas, counts = compose_outfit(args.source_dir, outfit)
         atlases[outfit] = atlas
-        webp_path = args.asset_dir / f"spritesheet_{outfit}.webp"
-        png_path = args.qa_dir / f"spritesheet_{outfit}.png"
-        atlas.save(webp_path, lossless=True, method=6)
-        atlas.save(png_path)
+        atlas = normalize_transparent_pixels(atlas)
+        asset_path = args.asset_dir / f"spritesheet_{outfit}.png"
+        qa_path = args.qa_dir / f"spritesheet_{outfit}.png"
+        atlas.save(asset_path)
+        atlas.save(qa_path)
         report["atlases"][outfit] = {
-            "webp": str(webp_path),
-            "png": str(png_path),
+            "asset": str(asset_path),
+            "qa_png": str(qa_path),
             "size": list(atlas.size),
             "cell": [CELL_W, CELL_H],
             "states": counts,
