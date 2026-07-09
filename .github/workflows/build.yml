@@ -44,16 +44,8 @@ jobs:
           path: dist/EOE-UN-pet-2.0.zip
 
   macos:
-    name: macOS package (${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-26
-            arch: arm64
-          - runner: macos-26-intel
-            arch: intel
+    name: macOS package (Apple Silicon)
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
@@ -79,5 +71,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: EOE-UN-pet-2.0-macOS-${{ matrix.arch }}-unsigned
+          name: EOE-UN-pet-2.0-macOS-arm64-unsigned
           path: dist-macos/EOE-UN-pet-2.0-macOS-unsigned.zip

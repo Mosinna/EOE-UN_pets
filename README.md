@@ -32,7 +32,7 @@ This is an unsigned Windows app, so SmartScreen may show a warning on first run.
 
 ### macOS
 
-Use the unsigned test package `EOE-UN-pet-2.0-macOS-unsigned.zip` when it is attached to a release or downloaded from a GitHub Actions build artifact. Unzip it, then open `EOE-柚恩桌宠2.0.app`.
+Use the unsigned Apple Silicon test package `EOE-UN-pet-2.0-macOS-unsigned.zip` when it is attached to a release or downloaded from a GitHub Actions build artifact. Unzip it, then open `EOE-柚恩桌宠2.0.app`.
 
 This first macOS build is not signed or notarized. If Gatekeeper blocks the first launch, right-click the app, choose Open, then confirm. macOS settings and logs are stored in:
 
@@ -49,7 +49,7 @@ python -m pip install -r requirements.txt
 python .\CodexPet.pyw
 ```
 
-macOS:
+macOS Apple Silicon:
 
 ```bash
 python3 -m pip install -r requirements.txt
@@ -64,7 +64,7 @@ Windows:
 powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1
 ```
 
-macOS:
+macOS Apple Silicon:
 
 ```bash
 python3 -m pip install -r requirements.txt
