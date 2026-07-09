@@ -1,0 +1,83 @@
+name: Build desktop pet packages
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    name: Windows package
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Validate sprite sheets
+        shell: pwsh
+        run: |
+          python -m py_compile .\CodexPet.pyw
+          python .\CodexPet.pyw --check
+          if (Get-ChildItem .\assets -Filter *.webp -ErrorAction SilentlyContinue) {
+            throw "WebP sprite sheets should not be packaged."
+          }
+
+      - name: Build Windows package
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1
+          $localZipName = "EOE-" + [char]0x67DA + [char]0x6069 + [char]0x684C + [char]0x5BA0 + "2.0.zip"
+          Copy-Item -LiteralPath (Join-Path ".\dist" $localZipName) -Destination ".\dist\EOE-UN-pet-2.0.zip" -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EOE-UN-pet-2.0-windows
+          path: dist/EOE-UN-pet-2.0.zip
+
+  macos:
+    name: macOS package (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-26
+            arch: arm64
+          - runner: macos-26-intel
+            arch: intel
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: python3 -m pip install -r requirements.txt
+
+      - name: Validate sprite sheets
+        run: |
+          python3 -m py_compile CodexPet.pyw
+          python3 CodexPet.pyw --check
+          if find assets -name '*.webp' -print -quit | grep -q .; then
+            echo "WebP sprite sheets should not be packaged." >&2
+            exit 1
+          fi
+
+      - name: Build unsigned macOS app
+        run: bash scripts/build-macos.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EOE-UN-pet-2.0-macOS-${{ matrix.arch }}-unsigned
+          path: dist-macos/EOE-UN-pet-2.0-macOS-unsigned.zip

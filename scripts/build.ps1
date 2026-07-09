@@ -38,7 +38,19 @@ Copy-Item (Join-Path $root "Start-CodexPet.ps1") (Join-Path $dist "Start-CodexPe
 Copy-Item (Join-Path $root "Uninstall-Startup.ps1") (Join-Path $dist "Uninstall-Startup.ps1") -Force
 
 if (Test-Path $zip) { Remove-Item $zip -Force }
-Compress-Archive -Path (Join-Path $dist "*") -DestinationPath $zip -Force
+for ($attempt = 1; $attempt -le 10; $attempt++) {
+    try {
+        Start-Sleep -Milliseconds (250 * $attempt)
+        if (Test-Path $zip) { Remove-Item $zip -Force -ErrorAction SilentlyContinue }
+        $error.Clear()
+        Compress-Archive -Path (Join-Path $dist "*") -DestinationPath $zip -Force -ErrorAction Stop
+        if ($error.Count -gt 0) { throw $error[0] }
+        break
+    } catch {
+        if ($attempt -eq 10) { throw }
+        Start-Sleep -Milliseconds (250 * $attempt)
+    }
+}
 
 Write-Host "Built: $exe"
 Write-Host "Packed: $zip"

@@ -1,6 +1,6 @@
 # EOE-柚恩桌宠2.0
 
-A standalone Windows desktop pet for EOE 柚恩. The release package runs independently, so Codex does not need to be open.
+A standalone desktop pet for EOE 柚恩. The release package runs independently, so Codex does not need to be open.
 
 ## Features
 
@@ -13,9 +13,12 @@ A standalone Windows desktop pet for EOE 柚恩. The release package runs indepe
 - Click outside popups to close them
 - Optional idle-only random actions play two loops, then return to idle
 - Saves position, size, outfit, and random-action preference
-- Optional per-user Windows startup helper scripts
+- Windows startup helper scripts
+- Experimental unsigned macOS app build
 
 ## Download
+
+### Windows
 
 Download `EOE-UN-pet-2.0.zip` from the `EOE-柚恩桌宠2.0` GitHub Release, unzip it, then double-click `CodexPet.exe`.
 
@@ -27,23 +30,53 @@ Optional helper scripts:
 
 This is an unsigned Windows app, so SmartScreen may show a warning on first run.
 
+### macOS
+
+Use the unsigned test package `EOE-UN-pet-2.0-macOS-unsigned.zip` when it is attached to a release or downloaded from a GitHub Actions build artifact. Unzip it, then open `EOE-柚恩桌宠2.0.app`.
+
+This first macOS build is not signed or notarized. If Gatekeeper blocks the first launch, right-click the app, choose Open, then confirm. macOS settings and logs are stored in:
+
+```text
+~/Library/Application Support/EOE-UN-Pet/
+```
+
 ## Run From Source
+
+Windows:
 
 ```powershell
 python -m pip install -r requirements.txt
 python .\CodexPet.pyw
 ```
 
+macOS:
+
+```bash
+python3 -m pip install -r requirements.txt
+python3 ./CodexPet.pyw
+```
+
 ## Build
+
+Windows:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1
 ```
 
+macOS:
+
+```bash
+python3 -m pip install -r requirements.txt
+bash ./scripts/build-macos.sh
+```
+
 Build outputs:
 
-- `dist\CodexPet.exe`
-- `dist\EOE-柚恩桌宠2.0.zip`
+- Windows: `dist\CodexPet.exe`
+- Windows zip: `dist\EOE-柚恩桌宠2.0.zip`
+- macOS app: `dist-macos/EOE-柚恩桌宠2.0.app`
+- macOS zip: `dist-macos/EOE-UN-pet-2.0-macOS-unsigned.zip`
 
 ## License
 

@@ -1,16 +1,28 @@
 from __future__ import annotations
 
 import ctypes
-from ctypes import wintypes
 import json
 import os
 import random
+import subprocess
 import sys
 import traceback
 from pathlib import Path
 
 import tkinter as tk
 from PIL import Image, ImageTk
+
+
+IS_WINDOWS = sys.platform == "win32"
+IS_MACOS = sys.platform == "darwin"
+APP_STORAGE_DIR_NAME = "EOE-UN-Pet"
+APP_TITLE = "EOE-\u67da\u6069\u684c\u5ba02.0"
+UI_FONT = "Segoe UI" if IS_WINDOWS else "Helvetica Neue"
+
+if IS_WINDOWS:
+    from ctypes import wintypes
+else:
+    wintypes = None
 
 
 if getattr(sys, "frozen", False):
@@ -20,6 +32,13 @@ else:
     BASE_DIR = Path(__file__).resolve().parent
     RESOURCE_DIR = BASE_DIR
 
+
+def data_dir() -> Path:
+    if IS_MACOS:
+        return Path.home() / "Library" / "Application Support" / APP_STORAGE_DIR_NAME
+    return BASE_DIR
+
+
 ASSET_DIR = RESOURCE_DIR / "assets"
 SPRITESHEET = ASSET_DIR / "spritesheet.png"
 OUTFITS = [
@@ -28,10 +47,12 @@ OUTFITS = [
     ("coat_off", "\u8131\u5916\u5957", "spritesheet_coat_off.png"),
 ]
 OUTFIT_LOOKUP = {outfit_id: (label, filename) for outfit_id, label, filename in OUTFITS}
-STATE_FILE = BASE_DIR / "pet-state.json"
-LOG_FILE = BASE_DIR / "pet-error.log"
+DATA_DIR = data_dir()
+STATE_FILE = DATA_DIR / "pet-state.json"
+LOG_FILE = DATA_DIR / "pet-error.log"
 
 TRANSPARENT_COLOR = "#ff00ff"
+TRANSPARENT_BG = "systemTransparent" if IS_MACOS else TRANSPARENT_COLOR
 COLS = 8
 STATES = [
     ("idle", 180),
@@ -107,6 +128,8 @@ class WINDOWCOMPOSITIONATTRIBDATA(ctypes.Structure):
 
 
 def set_dpi_aware() -> None:
+    if not IS_WINDOWS:
+        return
     try:
         ctypes.windll.user32.SetProcessDPIAware()
     except Exception:
@@ -114,6 +137,8 @@ def set_dpi_aware() -> None:
 
 
 def set_rounded_window(window: tk.Toplevel, width: int, height: int, radius: int) -> None:
+    if not IS_WINDOWS or wintypes is None:
+        return
     try:
         hwnd = wintypes.HWND(window.winfo_id())
         region = ctypes.windll.gdi32.CreateRoundRectRgn(0, 0, width + 1, height + 1, radius, radius)
@@ -124,6 +149,8 @@ def set_rounded_window(window: tk.Toplevel, width: int, height: int, radius: int
 
 
 def set_ellipse_window(window: tk.Toplevel, width: int, height: int) -> None:
+    if not IS_WINDOWS or wintypes is None:
+        return
     try:
         hwnd = wintypes.HWND(window.winfo_id())
         region = ctypes.windll.gdi32.CreateEllipticRgn(0, 0, width + 1, height + 1)
@@ -134,6 +161,8 @@ def set_ellipse_window(window: tk.Toplevel, width: int, height: int) -> None:
 
 
 def enable_acrylic(window: tk.Toplevel, alpha: int = 210) -> bool:
+    if not IS_WINDOWS or wintypes is None:
+        return False
     try:
         setter = ctypes.windll.user32.SetWindowCompositionAttribute
         hwnd = wintypes.HWND(window.winfo_id())
@@ -183,6 +212,8 @@ def create_round_rect(canvas: tk.Canvas, x1: int, y1: int, x2: int, y2: int, rad
 
 
 def claim_single_instance():
+    if not IS_WINDOWS or wintypes is None:
+        return None
     try:
         kernel32 = ctypes.windll.kernel32
         kernel32.CreateMutexW.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
@@ -196,8 +227,54 @@ def claim_single_instance():
         return None
 
 
+def ensure_data_dir() -> None:
+    if DATA_DIR != BASE_DIR:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def configure_transparent_window(window: tk.Toplevel, require: bool = False) -> bool:
+    ok = False
+    try:
+        window.configure(bg=TRANSPARENT_BG)
+    except tk.TclError:
+        window.configure(bg=TRANSPARENT_COLOR)
+
+    if IS_WINDOWS:
+        try:
+            window.wm_attributes("-transparentcolor", TRANSPARENT_COLOR)
+            ok = True
+        except tk.TclError:
+            ok = False
+    elif IS_MACOS:
+        try:
+            window.wm_attributes("-transparent", True)
+            ok = True
+        except tk.TclError:
+            ok = False
+    else:
+        ok = True
+
+    if require and not ok:
+        raise RuntimeError("Transparent pet windows are not available in this Tk runtime.")
+    return ok
+
+
+def open_path(path: Path) -> None:
+    if IS_WINDOWS:
+        os.startfile(path)
+    elif IS_MACOS:
+        subprocess.Popen(["open", str(path)])
+    else:
+        subprocess.Popen(["xdg-open", str(path)])
+
+
+def is_control_click(event) -> bool:
+    return IS_MACOS and bool(getattr(event, "state", 0) & 0x4)
+
+
 def log_error() -> None:
     try:
+        ensure_data_dir()
         LOG_FILE.write_text(traceback.format_exc(), encoding="utf-8")
     except Exception:
         pass
@@ -214,6 +291,7 @@ def load_settings() -> dict:
 
 def save_settings(settings: dict) -> None:
     try:
+        ensure_data_dir()
         STATE_FILE.write_text(json.dumps(settings, indent=2), encoding="utf-8")
     except Exception:
         pass
@@ -324,20 +402,15 @@ class PetApp:
 
         self.root = tk.Tk()
         self.root.withdraw()
-        self.root.title("EOE-柚恩桌宠2.0")
-        self.root.configure(bg=TRANSPARENT_COLOR)
+        self.root.title(APP_TITLE)
+        configure_transparent_window(self.root, require=IS_MACOS)
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         try:
             self.root.wm_attributes("-toolwindow", True)
         except tk.TclError:
             pass
-        try:
-            self.root.wm_attributes("-transparentcolor", TRANSPARENT_COLOR)
-        except tk.TclError:
-            pass
-
-        self.label = tk.Label(self.root, bg=TRANSPARENT_COLOR, bd=0, highlightthickness=0)
+        self.label = tk.Label(self.root, bg=TRANSPARENT_BG, bd=0, highlightthickness=0)
         self.label.pack()
 
         self.prepare_source_frames()
@@ -468,28 +541,52 @@ class PetApp:
             {"kind": "command", "label": "\u9000\u51fa", "action": "quit"},
         ]
 
+    def bind_secondary_drag(self, widget) -> None:
+        widget.bind("<ButtonPress-3>", self.handle_secondary_down)
+        widget.bind("<B3-Motion>", self.handle_secondary_drag)
+        widget.bind("<ButtonRelease-3>", self.handle_secondary_up)
+        if IS_MACOS:
+            widget.bind("<ButtonPress-2>", self.handle_secondary_down)
+            widget.bind("<B2-Motion>", self.handle_secondary_drag)
+            widget.bind("<ButtonRelease-2>", self.handle_secondary_up)
+            widget.bind("<Control-ButtonPress-1>", self.handle_secondary_down)
+            widget.bind("<Control-B1-Motion>", self.handle_secondary_drag)
+            widget.bind("<Control-ButtonRelease-1>", self.handle_secondary_up)
+
+    def bind_secondary_release(self, widget, callback) -> None:
+        widget.bind("<ButtonRelease-3>", callback)
+        if IS_MACOS:
+            widget.bind("<ButtonRelease-2>", callback)
+            widget.bind("<Control-ButtonRelease-1>", callback)
+
+    def handle_secondary_down(self, event):
+        self.on_right_down(event)
+        return "break"
+
+    def handle_secondary_drag(self, event):
+        self.on_right_drag(event)
+        return "break"
+
+    def handle_secondary_up(self, event):
+        self.on_right_up(event)
+        return "break"
+
     def bind_events(self) -> None:
         for widget in (self.root, self.label):
             widget.bind("<ButtonPress-1>", self.on_left_down)
             widget.bind("<B1-Motion>", self.on_drag)
             widget.bind("<ButtonRelease-1>", self.on_left_up)
             widget.bind("<Double-Button-1>", lambda _event: self.play_once("waving", 2600))
-            widget.bind("<ButtonPress-3>", self.on_right_down)
-            widget.bind("<B3-Motion>", self.on_right_drag)
-            widget.bind("<ButtonRelease-3>", self.on_right_up)
+            self.bind_secondary_drag(widget)
 
     def setup_resize_handle(self) -> None:
         win = tk.Toplevel(self.root)
         win.withdraw()
         win.overrideredirect(True)
-        win.configure(bg=MENU_BG)
+        configure_transparent_window(win)
         win.attributes("-topmost", True)
         try:
             win.wm_attributes("-toolwindow", True)
-        except tk.TclError:
-            pass
-        try:
-            win.wm_attributes("-transparentcolor", TRANSPARENT_COLOR)
         except tk.TclError:
             pass
         try:
@@ -501,7 +598,7 @@ class PetApp:
             win,
             width=RESIZE_HANDLE_SIZE,
             height=RESIZE_HANDLE_SIZE,
-            bg=TRANSPARENT_COLOR,
+            bg=TRANSPARENT_BG,
             bd=0,
             highlightthickness=0,
             cursor="sizing",
@@ -515,9 +612,7 @@ class PetApp:
             widget.bind("<ButtonPress-1>", self.on_resize_handle_down)
             widget.bind("<B1-Motion>", self.on_resize_handle_drag)
             widget.bind("<ButtonRelease-1>", self.on_resize_handle_up)
-            widget.bind("<ButtonPress-3>", self.on_right_down)
-            widget.bind("<B3-Motion>", self.on_right_drag)
-            widget.bind("<ButtonRelease-3>", self.on_right_up)
+            self.bind_secondary_drag(widget)
 
         self.monitor_pointer()
 
@@ -566,7 +661,7 @@ class PetApp:
         try:
             self.root.deiconify()
             self.root.attributes("-topmost", True)
-            self.root.wm_attributes("-transparentcolor", TRANSPARENT_COLOR)
+            configure_transparent_window(self.root)
             if not self.menu_is_open():
                 self.root.lift()
         except tk.TclError:
@@ -629,6 +724,8 @@ class PetApp:
             self.root.after(delay_ms, self.lift_menu_window)
 
     def mouse_buttons_down(self) -> bool:
+        if not IS_WINDOWS:
+            return False
         try:
             user32 = ctypes.windll.user32
             user32.GetAsyncKeyState.argtypes = (ctypes.c_int,)
@@ -822,12 +919,16 @@ class PetApp:
             self.save_position()
 
     def on_left_down(self, event) -> None:
+        if is_control_click(event):
+            return "break"
         self.hide_menu()
         self.drag_origin = (event.x_root, event.y_root)
         self.root_origin = (self.root.winfo_x(), self.root.winfo_y())
         self.dragging = False
 
     def on_drag(self, event) -> None:
+        if is_control_click(event):
+            return "break"
         if not self.drag_origin or not self.root_origin:
             return
         dx = event.x_root - self.drag_origin[0]
@@ -844,6 +945,8 @@ class PetApp:
             self.set_state(target_state)
 
     def on_left_up(self, _event) -> None:
+        if is_control_click(_event):
+            return "break"
         self.save_position()
         if self.dragging:
             self.set_state("idle")
@@ -1025,7 +1128,7 @@ class PetApp:
         win = tk.Toplevel(self.root)
         win.withdraw()
         win.overrideredirect(True)
-        win.configure(bg=TRANSPARENT_COLOR)
+        configure_transparent_window(win)
         win.attributes("-topmost", True)
         try:
             win.transient(self.root)
@@ -1036,13 +1139,15 @@ class PetApp:
         except tk.TclError:
             pass
 
-        canvas = tk.Canvas(win, width=MENU_WIDTH, height=height, bg=MENU_BG, bd=0, highlightthickness=0)
+        canvas = tk.Canvas(win, width=MENU_WIDTH, height=height, bg=TRANSPARENT_BG, bd=0, highlightthickness=0)
         canvas.pack()
         canvas.bind("<Motion>", self.on_menu_motion)
         canvas.bind("<Leave>", self.on_menu_leave)
         canvas.bind("<ButtonRelease-1>", self.on_menu_click)
         win.bind("<Escape>", lambda _event: self.hide_menu())
-        win.bind("<Button-3>", lambda _event: self.hide_menu())
+        self.bind_secondary_release(win, lambda _event: self.hide_menu())
+        if IS_MACOS:
+            win.bind("<FocusOut>", lambda _event: self.hide_menu())
 
         self.menu_window = win
         self.menu_canvas = canvas
@@ -1091,7 +1196,7 @@ class PetApp:
         win = tk.Toplevel(self.root)
         win.withdraw()
         win.overrideredirect(True)
-        win.configure(bg=MENU_BG)
+        configure_transparent_window(win)
         win.attributes("-topmost", True)
         try:
             win.transient(self.root)
@@ -1102,14 +1207,16 @@ class PetApp:
         except tk.TclError:
             pass
 
-        canvas = tk.Canvas(win, width=WARDROBE_SIZE, height=WARDROBE_SIZE, bg=MENU_BG, bd=0, highlightthickness=0)
+        canvas = tk.Canvas(win, width=WARDROBE_SIZE, height=WARDROBE_SIZE, bg=TRANSPARENT_BG, bd=0, highlightthickness=0)
         canvas.pack()
         canvas.bind("<Motion>", self.on_wardrobe_motion)
         canvas.bind("<Leave>", self.on_wardrobe_leave)
         canvas.bind("<ButtonRelease-1>", self.on_wardrobe_click)
-        canvas.bind("<ButtonRelease-3>", self.on_wardrobe_click)
+        self.bind_secondary_release(canvas, self.on_wardrobe_click)
         win.bind("<Escape>", lambda _event: self.hide_menu())
-        win.bind("<Button-3>", lambda _event: self.hide_menu())
+        self.bind_secondary_release(win, lambda _event: self.hide_menu())
+        if IS_MACOS:
+            win.bind("<FocusOut>", lambda _event: self.hide_menu())
 
         self.menu_window = win
         self.menu_canvas = canvas
@@ -1150,7 +1257,7 @@ class PetApp:
             fill=WARDROBE_BUTTON_HOVER if center_hover else WARDROBE_CENTER_FILL,
             outline="",
         )
-        canvas.create_text(center, center, text="\u83dc\u5355", fill=MENU_TEXT, font=("Segoe UI", 10))
+        canvas.create_text(center, center, text="\u83dc\u5355", fill=MENU_TEXT, font=(UI_FONT, 10))
 
         for outfit_id, label, cx, cy in self.wardrobe_options():
             self.menu_layout.append(("outfit", outfit_id, cx, cy, WARDROBE_BUTTON_RADIUS))
@@ -1169,7 +1276,7 @@ class PetApp:
             icon = self.wardrobe_icons.get(outfit_id)
             if icon is not None:
                 canvas.create_image(cx, cy - 5, image=icon)
-            canvas.create_text(cx, cy + 25, text=label, fill=text_fill, font=("Segoe UI", 8))
+            canvas.create_text(cx, cy + 25, text=label, fill=text_fill, font=(UI_FONT, 8))
 
     def wardrobe_item_at(self, x: int, y: int):
         for kind, value, cx, cy, radius in self.menu_layout:
@@ -1282,7 +1389,7 @@ class PetApp:
                 text=item["label"],
                 anchor="w",
                 fill=MENU_TEXT,
-                font=("Segoe UI", 10),
+                font=(UI_FONT, 10),
             )
             action = item.get("action")
             active = action == self.state or action == f"outfit:{self.outfit_id}"
@@ -1336,7 +1443,9 @@ class PetApp:
             self.quit()
 
     def open_folder(self) -> None:
-        os.startfile(BASE_DIR)
+        target = DATA_DIR if IS_MACOS else BASE_DIR
+        ensure_data_dir()
+        open_path(target)
 
     def quit(self) -> None:
         if self.random_job is not None:

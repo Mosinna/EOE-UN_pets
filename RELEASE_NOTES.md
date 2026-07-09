@@ -6,6 +6,9 @@ EOE-柚恩桌宠2.0 release.
 - Added suit sprite sheets and outfit persistence
 - Fixed suit waving animation scale so the pet no longer shrinks during the wave
 - Fixed suit-without-coat review animation scale so the review loop stays consistent with idle
+- Switched packaged atlases to clean PNG files validated with Hatch Pet, removing hidden transparent-pixel RGB residue from the old WebP assets
+- Added an experimental macOS compatibility path that keeps Tkinter, skips Windows-only APIs on macOS, stores macOS settings under `~/Library/Application Support/EOE-UN-Pet/`, and supports unsigned `.app` packaging
+- Added GitHub Actions package builds for Windows plus macOS arm64 and Intel runners
 - Improved menu/window layering and display recovery
 - Keeps transparent always-on-top desktop pet behavior, drag interactions, resizing, random actions, and startup helper scripts
 
