@@ -35,10 +35,13 @@ cp -R "$DIST/$APP_NAME.app" "$PACKAGE/"
 cp "$ROOT/README.md" "$PACKAGE/README.md"
 cp "$ROOT/RELEASE_NOTES.md" "$PACKAGE/RELEASE_NOTES.md"
 cp "$ROOT/LICENSE" "$PACKAGE/LICENSE"
+if [ -d "$ROOT/docs" ]; then
+  cp -R "$ROOT/docs" "$PACKAGE/docs"
+fi
 
 (
   cd "$PACKAGE"
-  /usr/bin/zip -r "$DIST/$ZIP_NAME" "$APP_NAME.app" README.md RELEASE_NOTES.md LICENSE
+  /usr/bin/zip -r "$DIST/$ZIP_NAME" "$APP_NAME.app" README.md RELEASE_NOTES.md LICENSE docs
 )
 
 echo "Built: $DIST/$APP_NAME.app"

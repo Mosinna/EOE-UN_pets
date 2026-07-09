@@ -7,8 +7,21 @@ $exe = Join-Path $dist "CodexPet.exe"
 $releaseZipName = "EOE-" + [char]0x67DA + [char]0x6069 + [char]0x684C + [char]0x5BA0 + "2.0.zip"
 $zip = Join-Path $dist $releaseZipName
 
-if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
-if (Test-Path $build) { Remove-Item $build -Recurse -Force }
+function Remove-PathWithRetry($path) {
+    if (-not (Test-Path $path)) { return }
+    for ($attempt = 1; $attempt -le 10; $attempt++) {
+        try {
+            Remove-Item $path -Recurse -Force -ErrorAction Stop
+            break
+        } catch {
+            if ($attempt -eq 10) { throw }
+            Start-Sleep -Milliseconds (250 * $attempt)
+        }
+    }
+}
+
+Remove-PathWithRetry $dist
+Remove-PathWithRetry $build
 New-Item -ItemType Directory -Path $dist | Out-Null
 
 python -m PyInstaller `
@@ -36,6 +49,9 @@ Copy-Item (Join-Path $root "README.md") (Join-Path $dist "README.md") -Force
 Copy-Item (Join-Path $root "Install-Startup.ps1") (Join-Path $dist "Install-Startup.ps1") -Force
 Copy-Item (Join-Path $root "Start-CodexPet.ps1") (Join-Path $dist "Start-CodexPet.ps1") -Force
 Copy-Item (Join-Path $root "Uninstall-Startup.ps1") (Join-Path $dist "Uninstall-Startup.ps1") -Force
+if (Test-Path (Join-Path $root "docs")) {
+    Copy-Item (Join-Path $root "docs") (Join-Path $dist "docs") -Recurse -Force
+}
 
 if (Test-Path $zip) { Remove-Item $zip -Force }
 for ($attempt = 1; $attempt -le 10; $attempt++) {
